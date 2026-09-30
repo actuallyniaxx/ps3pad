@@ -1,16 +1,16 @@
 /*
- * ps3pad - Reenvía un mando del PC (USB/Bluetooth) a una PS3 con webMAN MOD
+ * ps3pad - Forwards a PC gamepad (USB/Bluetooth) to a PS3 running webMAN MOD
  *
- * Usa el "virtual pad" de webMAN MOD:  http://<ip>/pad.ps3?hold_<botones>
- *   - "hold" deja el estado mandado fijo hasta la siguiente petición
- *   - cada petición sustituye el estado completo del mando virtual
- *   - "off" desregistra el mando virtual
+ * Uses webMAN MOD's virtual pad:  http://<ip>/pad.ps3?hold_<buttons>
+ *   - "hold" keeps the sent state until the next request
+ *   - every request replaces the whole virtual pad state
+ *   - "off" unregisters the virtual pad
  *
- * Limitaciones de webMAN (no del programa):
- *   - Los sticks solo pueden ir a tope en 8 direcciones (0x00 / 0xFF), no hay analógico fino.
- *   - Si se manda un stick, las direcciones dejan de afectar a la cruceta en esa petición.
- *   - Solo un stick analógico por petición.
- *   - Es HTTP: latencia de decenas de ms. Perfecto para XMB/menús, justito para jugar.
+ * webMAN limitations (not this program's):
+ *   - Sticks can only be fully deflected in 8 directions (0x00 / 0xFF), no fine analog.
+ *   - When a stick is sent, directions stop affecting the D-pad in that request.
+ *   - Only one analog stick per request.
+ *   - It's HTTP: tens of ms of latency. Great for XMB/menus, meh for gaming.
  */
 
 #define SDL_MAIN_HANDLED
@@ -49,16 +49,16 @@ typedef enum { STICK_DPAD, STICK_ANALOG, STICK_OFF } stick_mode_t;
 static struct {
     const char  *host;
     char         port[8];
-    int          pad_index;     /* -1 = el primero que aparezca */
+    int          pad_index;     /* -1 = first one found */
     stick_mode_t stick;
     int          deadzone;      /* 0..32767 */
-    int          trigger;       /* umbral de L2/R2, 0..32767 */
+    int          trigger;       /* L2/R2 threshold, 0..32767 */
     int          dry_run;
     int          verbose;
-    int          send_off;      /* mandar "off" al salir */
+    int          send_off;      /* send "off" on exit */
 } cfg = { NULL, "80", -1, STICK_DPAD, 16000, 12000, 0, 0, 1 };
 
-/* --------------------------------------------------------------- red (HTTP) */
+/* ------------------------------------------------------------ network (HTTP) */
 
 static int http_get(const char *path)
 {
@@ -72,7 +72,7 @@ static int http_get(const char *path)
     hints.ai_socktype = SOCK_STREAM;
 
     if (getaddrinfo(cfg.host, cfg.port, &hints, &res) != 0 || !res) {
-        fprintf(stderr, "[red] no puedo resolver %s\n", cfg.host);
+        fprintf(stderr, "[net] can't resolve %s\n", cfg.host);
         return 0;
     }
 
@@ -95,7 +95,7 @@ static int http_get(const char *path)
     freeaddrinfo(res);
 
     if (s == BADSOCK) {
-        fprintf(stderr, "[red] no conecta con %s:%s (¿PS3 encendida? ¿webMAN cargado?)\n",
+        fprintf(stderr, "[net] can't connect to %s:%s (PS3 on? webMAN loaded?)\n",
                 cfg.host, cfg.port);
         return 0;
     }
@@ -105,7 +105,7 @@ static int http_get(const char *path)
                    path, cfg.host);
 
     if (send(s, req, len, 0) == len) {
-        /* Vaciamos la respuesta: webMAN procesa y cierra. */
+        /* Drain the response: webMAN processes and closes. */
         char buf[1024];
         int n, first = 1;
         while ((n = recv(s, buf, sizeof buf - 1, 0)) > 0) {
@@ -115,19 +115,19 @@ static int http_get(const char *path)
                 if (!ok && cfg.verbose) {
                     char *eol = strpbrk(buf, "\r\n");
                     if (eol) *eol = '\0';
-                    fprintf(stderr, "[red] respuesta rara: %s\n", buf);
+                    fprintf(stderr, "[net] unexpected response: %s\n", buf);
                 }
                 first = 0;
             }
         }
-        if (first) ok = 1; /* cerró sin cuerpo: lo damos por bueno */
+        if (first) ok = 1; /* closed with no body: count it as ok */
     }
 
     CLOSESOCK(s);
     return ok;
 }
 
-/* -------------------------------------------- hilo emisor (coalesce estado) */
+/* ------------------------------------------ sender thread (coalesces state) */
 
 static SDL_mutex *mtx;
 static SDL_cond  *cnd;
@@ -138,7 +138,7 @@ static int        quitting    = 0;
 static void queue_cmd(const char *cmd)
 {
     SDL_LockMutex(mtx);
-    SDL_strlcpy(pending, cmd, sizeof pending); /* solo importa el último estado */
+    SDL_strlcpy(pending, cmd, sizeof pending); /* only the latest state matters */
     has_pending = 1;
     SDL_CondSignal(cnd);
     SDL_UnlockMutex(mtx);
@@ -179,13 +179,13 @@ static int sender_thread(void *unused)
     return 0;
 }
 
-/* ---------------------------------------------------- mando -> comando webMAN */
+/* ------------------------------------------------ gamepad -> webMAN command */
 
 static const struct { SDL_GameControllerButton b; const char *name; } BTN_MAP[] = {
-    { SDL_CONTROLLER_BUTTON_A,             "cross"    },  /* abajo  */
-    { SDL_CONTROLLER_BUTTON_B,             "circle"   },  /* derecha */
-    { SDL_CONTROLLER_BUTTON_X,             "square"   },  /* izquierda */
-    { SDL_CONTROLLER_BUTTON_Y,             "triangle" },  /* arriba */
+    { SDL_CONTROLLER_BUTTON_A,             "cross"    },  /* bottom */
+    { SDL_CONTROLLER_BUTTON_B,             "circle"   },  /* right  */
+    { SDL_CONTROLLER_BUTTON_X,             "square"   },  /* left   */
+    { SDL_CONTROLLER_BUTTON_Y,             "triangle" },  /* top    */
     { SDL_CONTROLLER_BUTTON_LEFTSHOULDER,  "l1"       },
     { SDL_CONTROLLER_BUTTON_RIGHTSHOULDER, "r1"       },
     { SDL_CONTROLLER_BUTTON_LEFTSTICK,     "l3"       },
@@ -193,13 +193,13 @@ static const struct { SDL_GameControllerButton b; const char *name; } BTN_MAP[] 
     { SDL_CONTROLLER_BUTTON_BACK,          "select"   },
     { SDL_CONTROLLER_BUTTON_START,         "start"    },
     { SDL_CONTROLLER_BUTTON_GUIDE,         "psbtn"    },
-    { SDL_CONTROLLER_BUTTON_MISC1,         "psbtn"    },  /* Share/Capture: PS alternativo */
-    { SDL_CONTROLLER_BUTTON_TOUCHPAD,      "psbtn"    },  /* touchpad DS4/DS5: idem */
+    { SDL_CONTROLLER_BUTTON_MISC1,         "psbtn"    },  /* Share/Capture: alternative PS */
+    { SDL_CONTROLLER_BUTTON_TOUCHPAD,      "psbtn"    },  /* DS4/DS5 touchpad: same */
 };
 
 static void add(char *cmd, const char *tok)
 {
-    /* psbtn puede venir de varios botones físicos: no lo repetimos */
+    /* psbtn can come from several physical buttons: don't repeat it */
     if (!strcmp(tok, "psbtn") && strstr(cmd, "psbtn")) return;
     SDL_strlcat(cmd, "_", CMD_MAX);
     SDL_strlcat(cmd, tok, CMD_MAX);
@@ -219,7 +219,7 @@ static void build_cmd(SDL_GameController *gc, char *cmd)
     int u, d, l, r;
 
     SDL_strlcpy(cmd, "hold", CMD_MAX);
-    if (!gc) return; /* sin mando = todo suelto */
+    if (!gc) return; /* no pad = everything released */
 
     for (i = 0; i < SDL_arraysize(BTN_MAP); i++)
         if (SDL_GameControllerGetButton(gc, BTN_MAP[i].b)) add(cmd, BTN_MAP[i].name);
@@ -227,7 +227,7 @@ static void build_cmd(SDL_GameController *gc, char *cmd)
     if (SDL_GameControllerGetAxis(gc, SDL_CONTROLLER_AXIS_TRIGGERLEFT)  > cfg.trigger) add(cmd, "l2");
     if (SDL_GameControllerGetAxis(gc, SDL_CONTROLLER_AXIS_TRIGGERRIGHT) > cfg.trigger) add(cmd, "r2");
 
-    /* Direcciones de cruceta (real + stick izq. si modo dpad) */
+    /* D-pad directions (real + left stick in dpad mode) */
     u = SDL_GameControllerGetButton(gc, SDL_CONTROLLER_BUTTON_DPAD_UP);
     d = SDL_GameControllerGetButton(gc, SDL_CONTROLLER_BUTTON_DPAD_DOWN);
     l = SDL_GameControllerGetButton(gc, SDL_CONTROLLER_BUTTON_DPAD_LEFT);
@@ -242,7 +242,7 @@ static void build_cmd(SDL_GameController *gc, char *cmd)
     }
 
     if (u || d || l || r) {
-        /* La cruceta manda: webMAN no mezcla cruceta y stick en la misma petición */
+        /* D-pad wins: webMAN can't mix D-pad and stick in one request */
         if (u) add(cmd, "up");
         if (d) add(cmd, "down");
         if (l) add(cmd, "left");
@@ -252,8 +252,8 @@ static void build_cmd(SDL_GameController *gc, char *cmd)
 
     if (cfg.stick == STICK_OFF) return;
 
-    /* Sticks analógicos (a tope, 8 direcciones, uno por petición).
-       En modo dpad el izquierdo ya se usó arriba, así que solo queda el derecho. */
+    /* Analog sticks (full deflection, 8 directions, one per request).
+       In dpad mode the left stick was already used above, so only the right one is left. */
     {
         const char *stick = NULL;
         int su, sd, sl, sr;
@@ -280,7 +280,7 @@ static void build_cmd(SDL_GameController *gc, char *cmd)
     }
 }
 
-/* ---------------------------------------------------------------- mandos */
+/* --------------------------------------------------------------- gamepads */
 
 static SDL_GameController *open_pad(void)
 {
@@ -299,14 +299,14 @@ static SDL_GameController *open_pad(void)
 static void list_pads(void)
 {
     int i, n = SDL_NumJoysticks(), found = 0;
-    printf("Mandos detectados:\n");
+    printf("Detected gamepads:\n");
     for (i = 0; i < n; i++) {
         printf("  [%d] %s%s\n", i,
                SDL_IsGameController(i) ? SDL_GameControllerNameForIndex(i) : SDL_JoystickNameForIndex(i),
-               SDL_IsGameController(i) ? "" : "  (sin mapeo, no usable)");
+               SDL_IsGameController(i) ? "" : "  (no mapping, unusable)");
         found = 1;
     }
-    if (!found) printf("  ninguno. Conéctalo/emparéjalo y vuelve a probar.\n");
+    if (!found) printf("  none. Plug it in / pair it and try again.\n");
 }
 
 /* ------------------------------------------------------------------ main */
@@ -314,30 +314,33 @@ static void list_pads(void)
 static void usage(const char *argv0)
 {
     printf(
-        "ps3pad " VERSION " - mando del PC -> PS3 vía webMAN MOD\n\n"
-        "Uso: %s <ip-ps3> [opciones]\n"
-        "     %s --list\n\n"
-        "Opciones:\n"
-        "  --port N          puerto del servidor web de webMAN (def. 80)\n"
-        "  --pad N           usar el mando N de --list (def. el primero)\n"
-        "  --stick MODO      dpad   = stick izq. hace de cruceta, dcho. = analogR (def.)\n"
-        "                    analog = ambos sticks como analógicos (a tope)\n"
-        "                    off    = ignorar sticks\n"
-        "  --deadzone N      zona muerta de sticks, 0-32767 (def. 16000)\n"
-        "  --trigger N       umbral de L2/R2, 0-32767 (def. 12000)\n"
-        "  --keep            no mandar 'off' al salir (deja el mando virtual registrado)\n"
-        "  --dry-run         no manda nada, imprime los comandos (para probar sin PS3)\n"
-        "  -v, --verbose     muestra cada petición y su latencia\n"
-        "  --list            lista mandos y sale\n",
+        "ps3pad " VERSION " - PC gamepad -> PS3 via webMAN MOD\n\n"
+        "Usage: %s <ps3-ip> [options]\n"
+        "       %s --list\n\n"
+        "Options:\n"
+        "  --port N          webMAN web server port (default 80)\n"
+        "  --pad N           use gamepad N from --list (default: first one)\n"
+        "  --stick MODE      dpad   = left stick acts as D-pad, right = analogR (default)\n"
+        "                    analog = both sticks as analog (full deflection)\n"
+        "                    off    = ignore sticks\n"
+        "  --deadzone N      stick deadzone, 0-32767 (default 16000)\n"
+        "  --trigger N       L2/R2 threshold, 0-32767 (default 12000)\n"
+        "  --keep            don't send 'off' on exit (keeps the virtual pad registered)\n"
+        "  --dry-run         send nothing, print the commands (test without a PS3)\n"
+        "  -v, --verbose     print every request and its latency\n"
+        "  --list            list gamepads and exit\n"
+        "  -h, --help        show this help\n",
         argv0, argv0);
 }
+
+static int want_help = 0;
 
 static int parse_args(int argc, char **argv, int *list_only)
 {
     int i;
     for (i = 1; i < argc; i++) {
         const char *a = argv[i];
-#define NEXT() (i + 1 < argc ? argv[++i] : (fprintf(stderr, "Falta valor para %s\n", a), exit(2), ""))
+#define NEXT() (i + 1 < argc ? argv[++i] : (fprintf(stderr, "Missing value for %s\n", a), exit(2), ""))
         if      (!strcmp(a, "--list"))    *list_only = 1;
         else if (!strcmp(a, "--port"))    SDL_strlcpy(cfg.port, NEXT(), sizeof cfg.port);
         else if (!strcmp(a, "--pad"))     cfg.pad_index = atoi(NEXT());
@@ -351,10 +354,10 @@ static int parse_args(int argc, char **argv, int *list_only)
             if      (!strcmp(m, "dpad"))   cfg.stick = STICK_DPAD;
             else if (!strcmp(m, "analog")) cfg.stick = STICK_ANALOG;
             else if (!strcmp(m, "off"))    cfg.stick = STICK_OFF;
-            else { fprintf(stderr, "Modo de stick desconocido: %s\n", m); return 0; }
+            else { fprintf(stderr, "Unknown stick mode: %s\n", m); return 0; }
         }
-        else if (!strcmp(a, "-h") || !strcmp(a, "--help")) return 0;
-        else if (a[0] == '-') { fprintf(stderr, "Opción desconocida: %s\n", a); return 0; }
+        else if (!strcmp(a, "-h") || !strcmp(a, "--help")) { want_help = 1; return 0; }
+        else if (a[0] == '-') { fprintf(stderr, "Unknown option: %s\n", a); return 0; }
         else cfg.host = a;
 #undef NEXT
     }
@@ -368,16 +371,16 @@ int main(int argc, char **argv)
     char cmd[CMD_MAX], last[CMD_MAX] = "";
     int list_only = 0, running = 1;
 
-    if (!parse_args(argc, argv, &list_only)) { usage(argv[0]); return 2; }
+    if (!parse_args(argc, argv, &list_only)) { usage(argv[0]); return want_help ? 0 : 2; }
     if (!cfg.host) cfg.host = "127.0.0.1";
 
 #ifdef _WIN32
-    { WSADATA w; if (WSAStartup(MAKEWORD(2, 2), &w) != 0) { fprintf(stderr, "WSAStartup falló\n"); return 1; } }
+    { WSADATA w; if (WSAStartup(MAKEWORD(2, 2), &w) != 0) { fprintf(stderr, "WSAStartup failed\n"); return 1; } }
 #else
     signal(SIGPIPE, SIG_IGN);
 #endif
 
-    /* Sin ventana: queremos eventos aunque no tengamos foco */
+    /* No window: we want events even without focus */
     SDL_SetHint(SDL_HINT_JOYSTICK_ALLOW_BACKGROUND_EVENTS, "1");
     SDL_SetHint(SDL_HINT_NO_SIGNAL_HANDLERS, "0");
     SDL_SetMainReady();
@@ -393,12 +396,12 @@ int main(int argc, char **argv)
     cnd = SDL_CreateCond();
     th  = SDL_CreateThread(sender_thread, "sender", NULL);
 
-    printf("ps3pad " VERSION " -> %s:%s%s  (Ctrl+C para salir)\n",
+    printf("ps3pad " VERSION " -> %s:%s%s  (Ctrl+C to quit)\n",
            cfg.host, cfg.port, cfg.dry_run ? " [dry-run]" : "");
 
     gc = open_pad();
-    if (gc) printf("Mando: %s\n", SDL_GameControllerName(gc));
-    else    printf("Esperando mando...\n");
+    if (gc) printf("Gamepad: %s\n", SDL_GameControllerName(gc));
+    else    printf("Waiting for a gamepad...\n");
 
     while (running) {
         SDL_Event ev;
@@ -413,16 +416,16 @@ int main(int argc, char **argv)
                 case SDL_CONTROLLERDEVICEADDED:
                     if (!gc) {
                         gc = open_pad();
-                        if (gc) { printf("Mando conectado: %s\n", SDL_GameControllerName(gc)); dirty = 1; }
+                        if (gc) { printf("Gamepad connected: %s\n", SDL_GameControllerName(gc)); dirty = 1; }
                     }
                     break;
                 case SDL_CONTROLLERDEVICEREMOVED:
                     if (gc && ev.cdevice.which ==
                         SDL_JoystickInstanceID(SDL_GameControllerGetJoystick(gc))) {
-                        printf("Mando desconectado, suelto todo.\n");
+                        printf("Gamepad disconnected, releasing everything.\n");
                         SDL_GameControllerClose(gc);
-                        gc = open_pad(); /* por si hay otro */
-                        if (gc) printf("Cambio a: %s\n", SDL_GameControllerName(gc));
+                        gc = open_pad(); /* in case there is another one */
+                        if (gc) printf("Switched to: %s\n", SDL_GameControllerName(gc));
                         dirty = 1;
                     }
                     break;
@@ -437,8 +440,8 @@ int main(int argc, char **argv)
 
         if (dirty && running) {
             build_cmd(gc, cmd);
-            /* Solo mandamos si cambia el estado cuantizado (los ejes cambian
-               a cada micro-movimiento, pero el comando no) */
+            /* Only send when the quantized state changes (axes change on
+               every micro-movement, the command doesn't) */
             if (strcmp(cmd, last) != 0) {
                 SDL_strlcpy(last, cmd, sizeof last);
                 queue_cmd(cmd);
@@ -446,7 +449,7 @@ int main(int argc, char **argv)
         }
     }
 
-    printf("\nSaliendo...\n");
+    printf("\nExiting...\n");
     queue_cmd(cfg.send_off ? "off" : "hold");
 
     SDL_LockMutex(mtx);
