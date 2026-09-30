@@ -45,7 +45,7 @@ jobs:
             mingw-w64-ucrt-x86_64-gcc
             mingw-w64-ucrt-x86_64-pkgconf
             mingw-w64-ucrt-x86_64-SDL2
-      # Estático: un único .exe sin SDL2.dll al lado
+      # Static: a single .exe, no SDL2.dll next to it
       - run: make STATIC=1
       - run: ./ps3pad.exe --help
       - run: |
