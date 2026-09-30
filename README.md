@@ -74,11 +74,3 @@ make
 # Windows (MSYS2 UCRT64), single exe:
 make STATIC=1
 ```
-
-## Releases
-
-Push a `v*` tag and GitHub publishes a release with every binary:
-
-```sh
-git tag v0.1.0 && git push --tags
-```
